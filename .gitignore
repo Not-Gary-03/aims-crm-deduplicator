@@ -1,0 +1,21 @@
+# Environment / secrets
+.env
+*.env
+
+# Output reports (contain lead PII)
+duplicate_report.csv
+duplicate_report.json
+*_report.csv
+*_report.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
