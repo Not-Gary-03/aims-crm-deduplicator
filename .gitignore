@@ -5,6 +5,8 @@
 # Output reports (contain lead PII)
 duplicate_report.csv
 duplicate_report.json
+meeting_dupe_report.csv
+meeting_dupe_report.json
 *_report.csv
 *_report.json
 
