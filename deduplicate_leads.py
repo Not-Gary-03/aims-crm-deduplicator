@@ -5,12 +5,15 @@ Close CRM Lead Deduplication Script
 Fetches all leads from Close CRM and identifies likely duplicates based on:
   - Exact email match       (confidence: 1.00)
   - Exact phone match       (confidence: 0.95)
-  - Fuzzy name match        (confidence: rapidfuzz score)
+  - Fuzzy name match        (disabled by default — too many false positives)
 
 Output: duplicate_report.csv + duplicate_report.json
 
 Usage:
-  CLOSE_API_KEY=your_key python3 -u deduplicate_leads.py
+  CLOSE_API_KEY=your_key python deduplicate_leads.py
+
+Debug (fast — limits leads fetched):
+  CLOSE_API_KEY=your_key DEBUG_LEAD_LIMIT=500 python deduplicate_leads.py
 
 Runtime: ~5-8 minutes for 63k leads (0.5s throttle, ~630 API calls).
 """
@@ -30,7 +33,14 @@ from rapidfuzz import fuzz
 # ── Config ────────────────────────────────────────────────────────────────────
 
 API_KEY = os.environ["CLOSE_API_KEY"]
-FUZZY_NAME_THRESHOLD = 85   # 0–100; pairs at or above this score are flagged
+
+# Set to True to re-enable fuzzy name matching (produces many false positives — use with caution)
+ENABLE_FUZZY_NAME    = False
+FUZZY_NAME_THRESHOLD = 85   # 0–100; only relevant when ENABLE_FUZZY_NAME = True
+
+# Debug: set to a positive integer to cap leads fetched (e.g. 500). 0 = fetch all.
+DEBUG_LEAD_LIMIT = int(os.environ.get("DEBUG_LEAD_LIMIT", 10000))
+
 OUTPUT_CSV  = "duplicate_report.csv"
 OUTPUT_JSON = "duplicate_report.json"
 
@@ -69,21 +79,31 @@ def fetch_all_leads():
     """
     Paginate ALL leads with minimal fields.
     ~630 API calls for 63k leads; ~5 min at 0.5s throttle.
+
+    Set DEBUG_LEAD_LIMIT to a positive integer to cap the fetch for fast test runs.
     """
     leads = []
     skip  = 0
     limit = 100
     page  = 0
 
-    print("Fetching all leads (this takes ~5-8 minutes)...", flush=True)
+    if DEBUG_LEAD_LIMIT:
+        print(f"DEBUG: fetching first {DEBUG_LEAD_LIMIT} leads only.", flush=True)
+    else:
+        print("Fetching all leads (this takes ~5-8 minutes)...", flush=True)
+
     while True:
         page += 1
-        data  = close_get("lead/", {"_fields": LEAD_FIELDS, "_skip": skip, "_limit": limit})
+        # In debug mode shrink the page size to exactly what's needed so we don't over-fetch
+        page_limit = min(limit, DEBUG_LEAD_LIMIT - len(leads)) if DEBUG_LEAD_LIMIT else limit
+        data  = close_get("lead/", {"_fields": LEAD_FIELDS, "_skip": skip, "_limit": page_limit})
         batch = data.get("data", [])
         leads.extend(batch)
         print(f"  Page {page}: +{len(batch)} leads  (running total: {len(leads)})", flush=True)
 
         if not data.get("has_more"):
+            break
+        if DEBUG_LEAD_LIMIT and len(leads) >= DEBUG_LEAD_LIMIT:
             break
         skip += limit
 
@@ -258,36 +278,45 @@ def find_name_duplicates(leads: list[dict], threshold: int = FUZZY_NAME_THRESHOL
 def build_report(leads, email_pairs, phone_pairs, name_pairs) -> list[dict]:
     lead_map = {lead["id"]: lead for lead in leads}
 
-    # Merge all pair dicts; for any key seen multiple times keep the highest-confidence entry
-    all_pairs: dict = {}
-    for source in [name_pairs, phone_pairs, email_pairs]:   # ascending confidence order
+    # Collect ALL signals that fired for each pair (a pair can match on email + phone + name)
+    # Structure: key -> {"email": match, "phone": match, "name": match}
+    all_signals: dict[tuple, dict] = {}
+    for signal_key, source in [("email", email_pairs), ("phone", phone_pairs), ("name", name_pairs)]:
         for key, match in source.items():
-            if key not in all_pairs or all_pairs[key]["confidence"] < match["confidence"]:
-                all_pairs[key] = match
+            all_signals.setdefault(key, {})[signal_key] = match
 
     rows = []
-    for (id_a, id_b), match in all_pairs.items():
+    for (id_a, id_b), signals in all_signals.items():
         a = lead_map.get(id_a, {})
         b = lead_map.get(id_b, {})
+
+        # First column: which signals matched, in priority order
+        matched = "+".join(k for k in ("email", "phone", "name") if k in signals)
+
+        # Best match is used for the detail columns (email > phone > name)
+        best = signals.get("email") or signals.get("phone") or signals.get("name")
+
         rows.append({
-            "lead_id_1":      id_a,
-            "lead_name_1":    a.get("display_name", ""),
-            "lead_status_1":  a.get("status_label", ""),
-            "lead_created_1": (a.get("date_created") or "")[:10],
-            "lead_emails_1":  "|".join(sorted(get_lead_emails(a))),
-            "lead_phones_1":  "|".join(sorted(get_lead_phones(a))),
-            "lead_id_2":      id_b,
-            "lead_name_2":    b.get("display_name", ""),
-            "lead_status_2":  b.get("status_label", ""),
-            "lead_created_2": (b.get("date_created") or "")[:10],
-            "lead_emails_2":  "|".join(sorted(get_lead_emails(b))),
-            "lead_phones_2":  "|".join(sorted(get_lead_phones(b))),
-            "match_type":     match["match_type"],
-            "match_value":    match["match_value"],
-            "confidence":     match["confidence"],
+            "matched_signals": matched,
+            "lead_id_1":       id_a,
+            "lead_name_1":     a.get("display_name", ""),
+            "lead_status_1":   a.get("status_label", ""),
+            "lead_created_1":  (a.get("date_created") or "")[:10],
+            "lead_emails_1":   "|".join(sorted(get_lead_emails(a))),
+            "lead_phones_1":   "|".join(sorted(get_lead_phones(a))),
+            "lead_id_2":       id_b,
+            "lead_name_2":     b.get("display_name", ""),
+            "lead_status_2":   b.get("status_label", ""),
+            "lead_created_2":  (b.get("date_created") or "")[:10],
+            "lead_emails_2":   "|".join(sorted(get_lead_emails(b))),
+            "lead_phones_2":   "|".join(sorted(get_lead_phones(b))),
+            "best_match_type":  best["match_type"],
+            "best_match_value": best["match_value"],
+            "confidence":       best["confidence"],
         })
 
-    rows.sort(key=lambda r: r["confidence"], reverse=True)
+    # Sort: multi-signal matches first, then by confidence descending
+    rows.sort(key=lambda r: (r["matched_signals"].count("+"), r["confidence"]), reverse=True)
     return rows
 
 
@@ -458,9 +487,13 @@ def main():
     phone_pairs = find_phone_duplicates(leads)
     print(f"  Phone exact:  {len(phone_pairs):,} pairs", flush=True)
 
-    print("  Running fuzzy name matching...", flush=True)
-    name_pairs = find_name_duplicates(leads)
-    print(f"  Name fuzzy:   {len(name_pairs):,} pairs  (threshold={FUZZY_NAME_THRESHOLD})", flush=True)
+    if ENABLE_FUZZY_NAME:
+        print("  Running fuzzy name matching...", flush=True)
+        name_pairs = find_name_duplicates(leads)
+        print(f"  Name fuzzy:   {len(name_pairs):,} pairs  (threshold={FUZZY_NAME_THRESHOLD})", flush=True)
+    else:
+        name_pairs = {}
+        print("  Name fuzzy:   skipped (ENABLE_FUZZY_NAME=False)", flush=True)
 
     rows = build_report(leads, email_pairs, phone_pairs, name_pairs)
     print(f"\nTotal unique duplicate pairs: {len(rows):,}", flush=True)

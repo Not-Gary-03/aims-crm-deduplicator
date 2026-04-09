@@ -36,7 +36,7 @@ NEXT STEPS:
     - There might be some special leads that don't follow the rules. "Quentin" seems to be strange, and it has an enormous number of booked meetings.
 
 ## TEST 2 2026/04/08
-Unmodified Claude-written program. Uses three dupe checks: email exact, phone number exact, and fuzzy name search. Finds lead and meeting dupes. Meeting dupe checks two cases, same_lead and cross_lead:
+Claude-written program. Uses three dupe checks: email exact, phone number exact, and fuzzy name search. Finds lead and meeting dupes. Meeting dupe checks two cases, same_lead and cross_lead:
 - same_lead: one lead has 2+ meetings.
 - cross_lead: two different leads have 1+ meeting and they share an email or phone number. No overlap with same_lead.
 
@@ -63,3 +63,15 @@ IDEAS:
 NEXT STEPS:
 - Change fuzzy match so that it doesn't hit as often, just try exact matching phone numbers and emails first.
 - Limit lead intake for faster testing (full database takes ~15 minutes right now), figure out what size still results in good spread of data.
+
+## TEST 3 2026/04/08
+Claude-written program. Uses two dupe checks: email exact and phone number exact. Limiting leads to be fetched to 10,000 for now.
+
+DUPLICATE REPORT FROM 10,000 LEADS- NO FUZZY MATCH:
+Out of 10,000 leads, only 88 matches across a variety of different leads. No stand-out with an irregularly large number of dupes.
+
+NEXT STEPS:
+- Update output to bring more relevant information to the forefront for easier human inspection.
+
+## TEST 4 2026/04/08
+Small change; output now displays which notable data members match.
