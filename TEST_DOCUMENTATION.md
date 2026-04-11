@@ -83,3 +83,6 @@ Met with Stephen. WHAT'S NEXT:
 
 DUPE MEETING CASES:
 - At the bottom line, **every lead has only one active meeting at a time.**
+
+Claude wrote a script to fetch and display all the data on a lead, I've chosen Andres Perez as a lead with multiple meetings and seemingly a long-term relationship with MA. The output is large, and is being kept in andres-perez-fields.txt.
+
