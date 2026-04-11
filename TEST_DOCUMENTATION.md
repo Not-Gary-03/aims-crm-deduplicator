@@ -75,3 +75,11 @@ NEXT STEPS:
 
 ## TEST 4 2026/04/08
 Small change; output now displays which notable data members match.
+
+## TEST 5 2026/04/10
+Met with Stephen. WHAT'S NEXT:
+- Document what fields and other data can be found regarding leads and meetings. Read some more Close CRM API documentation.
+- Write out cases for identifying duplicate leads and meetings.
+
+DUPE MEETING CASES:
+- At the bottom line, **every lead has only one active meeting at a time.**
