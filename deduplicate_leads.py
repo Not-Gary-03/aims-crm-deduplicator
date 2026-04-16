@@ -34,12 +34,11 @@ from rapidfuzz import fuzz
 
 API_KEY = os.environ["CLOSE_API_KEY"]
 
-# Set to True to re-enable fuzzy name matching (produces many false positives — use with caution)
-ENABLE_FUZZY_NAME    = False
-FUZZY_NAME_THRESHOLD = 85   # 0–100; only relevant when ENABLE_FUZZY_NAME = True
+# Minimum fuzzy name score (0–100) for conditions that require a name match.
+FUZZY_NAME_THRESHOLD = 85
 
 # Debug: set to a positive integer to cap leads fetched (e.g. 500). 0 = fetch all.
-DEBUG_LEAD_LIMIT = int(os.environ.get("DEBUG_LEAD_LIMIT", 1000))
+DEBUG_LEAD_LIMIT = int(os.environ.get("DEBUG_LEAD_LIMIT", 0))
 
 # ── Exclude List ──────────────────────────────────────────────────────────────
 # Values listed here are never used as duplicate signals.
@@ -268,115 +267,112 @@ def get_lead_phones(lead: dict) -> set[str]:
 
 # ── Duplicate Detection ───────────────────────────────────────────────────────
 
-def find_email_duplicates(leads: list[dict]) -> dict:
-    """Return pairs of lead IDs sharing an exact email address."""
-    index = defaultdict(list)
+def find_duplicate_leads(leads: list[dict]) -> dict:
+    """
+    Flags a pair of leads as duplicates if ANY of these conditions are met:
+      1. Same email  + fuzzy name match  (confidence: avg of 1.0 and name score)
+      2. Same phone  + fuzzy name match  (confidence: avg of 0.95 and name score)
+      3. Same email  + same phone        (confidence: 1.0 — two hard signals)
+
+    Name matching only runs on candidate pairs that already share an email or
+    phone, so there is no O(n²) name comparison across the full lead set.
+    """
+    lead_map = {lead["id"]: lead for lead in leads}
+
+    # Build email / phone indexes: value → [lead_ids]
+    email_index: dict[str, list[str]] = defaultdict(list)
+    phone_index: dict[str, list[str]] = defaultdict(list)
     for lead in leads:
         for email in get_lead_emails(lead):
-            index[email].append(lead["id"])
-
-    pairs = {}
-    for email, ids in index.items():
-        if len(ids) < 2:
-            continue
-        for i in range(len(ids)):
-            for j in range(i + 1, len(ids)):
-                key = tuple(sorted([ids[i], ids[j]]))
-                pairs[key] = {"match_type": "email_exact", "match_value": email, "confidence": 1.0}
-    return pairs
-
-
-def find_phone_duplicates(leads: list[dict]) -> dict:
-    """Return pairs of lead IDs sharing an exact normalised phone number."""
-    index = defaultdict(list)
-    for lead in leads:
+            email_index[email].append(lead["id"])
         for phone in get_lead_phones(lead):
-            index[phone].append(lead["id"])
+            phone_index[phone].append(lead["id"])
 
-    pairs = {}
-    for phone, ids in index.items():
-        if len(ids) < 2:
+    # Build candidate pair sets: which pairs share an email / phone
+    def _pairs_from_index(index: dict) -> dict[tuple, set]:
+        out: dict[tuple, set] = defaultdict(set)
+        for val, ids in index.items():
+            unique = list(dict.fromkeys(ids))
+            if len(unique) < 2:
+                continue
+            for i in range(len(unique)):
+                for j in range(i + 1, len(unique)):
+                    out[tuple(sorted([unique[i], unique[j]]))].add(val)
+        return out
+
+    email_pairs = _pairs_from_index(email_index)
+    phone_pairs = _pairs_from_index(phone_index)
+
+    def _name_score(id_a: str, id_b: str) -> float:
+        a = normalize_name(lead_map.get(id_a, {}).get("display_name", ""))
+        b = normalize_name(lead_map.get(id_b, {}).get("display_name", ""))
+        if not a or not b:
+            return 0.0
+        return fuzz.token_sort_ratio(a, b) / 100
+
+    results: dict[tuple, dict] = {}
+
+    # Condition 3: same email AND same phone (strongest signal — no name needed)
+    for key in email_pairs:
+        if key in phone_pairs:
+            shared_email = next(iter(email_pairs[key]))
+            shared_phone = next(iter(phone_pairs[key]))
+            results[key] = {
+                "matched_signals": "email+phone",
+                "match_value":     f"{shared_email} / {shared_phone}",
+                "confidence":      1.0,
+            }
+
+    threshold = FUZZY_NAME_THRESHOLD / 100
+
+    # Condition 1: same email + fuzzy name match
+    for key, emails in email_pairs.items():
+        if key in results:
             continue
-        for i in range(len(ids)):
-            for j in range(i + 1, len(ids)):
-                key = tuple(sorted([ids[i], ids[j]]))
-                if key not in pairs or pairs[key]["confidence"] < 0.95:
-                    pairs[key] = {"match_type": "phone_exact", "match_value": phone, "confidence": 0.95}
-    return pairs
+        id_a, id_b = key
+        score = _name_score(id_a, id_b)
+        if score >= threshold:
+            shared_email = next(iter(emails))
+            results[key] = {
+                "matched_signals": "email+name",
+                "match_value":     f"{shared_email} (name score: {score:.0%})",
+                "confidence":      round((1.0 + score) / 2, 3),
+            }
 
-
-def find_name_duplicates(leads: list[dict], threshold: int = FUZZY_NAME_THRESHOLD) -> dict:
-    """
-    Fuzzy name matching with first-word blocking to avoid O(n²) comparisons.
-
-    Leads are grouped by the first word of their normalised display_name.
-    Fuzzy comparison only happens within each group, making this practical
-    at scale while still catching the most common naming variants.
-    """
-    blocks: dict[str, list] = defaultdict(list)
-    for lead in leads:
-        name = normalize_name(lead.get("display_name", ""))
-        if not name:
+    # Condition 2: same phone + fuzzy name match
+    for key, phones in phone_pairs.items():
+        if key in results:
             continue
-        if is_excluded(name, "name"):
-            continue
-        words = name.split()
-        first_word = words[0] if words else ""
-        if len(first_word) < 3:   # skip tokens like "a", "mr", "dr"
-            continue
-        blocks[first_word].append((lead["id"], name))
+        id_a, id_b = key
+        score = _name_score(id_a, id_b)
+        if score >= threshold:
+            shared_phone = next(iter(phones))
+            results[key] = {
+                "matched_signals": "phone+name",
+                "match_value":     f"{shared_phone} (name score: {score:.0%})",
+                "confidence":      round((0.95 + score) / 2, 3),
+            }
 
-    pairs = {}
-    compared = 0
-    for block_leads in blocks.values():
-        if len(block_leads) < 2:
-            continue
-        for i in range(len(block_leads)):
-            for j in range(i + 1, len(block_leads)):
-                id_a, name_a = block_leads[i]
-                id_b, name_b = block_leads[j]
-                compared += 1
-                score = fuzz.token_sort_ratio(name_a, name_b)
-                if score >= threshold:
-                    key = tuple(sorted([id_a, id_b]))
-                    conf = round(score / 100, 3)
-                    if key not in pairs or pairs[key]["confidence"] < conf:
-                        pairs[key] = {
-                            "match_type": "name_fuzzy",
-                            "match_value": f'"{name_a}" ≈ "{name_b}"',
-                            "confidence": conf,
-                        }
-
-    print(f"  Name fuzzy: {compared:,} comparisons across {sum(1 for b in blocks.values() if len(b) >= 2)} blocks",
-          flush=True)
-    return pairs
+    counts = {"email+phone": 0, "email+name": 0, "phone+name": 0}
+    for r in results.values():
+        counts[r["matched_signals"]] += 1
+    print(f"  email+phone: {counts['email+phone']:,} pairs", flush=True)
+    print(f"  email+name:  {counts['email+name']:,} pairs  (name threshold={FUZZY_NAME_THRESHOLD})", flush=True)
+    print(f"  phone+name:  {counts['phone+name']:,} pairs  (name threshold={FUZZY_NAME_THRESHOLD})", flush=True)
+    return results
 
 
 # ── Report ────────────────────────────────────────────────────────────────────
 
-def build_report(leads, email_pairs, phone_pairs, name_pairs) -> list[dict]:
+def build_report(leads: list[dict], pairs: dict) -> list[dict]:
     lead_map = {lead["id"]: lead for lead in leads}
 
-    # Collect ALL signals that fired for each pair (a pair can match on email + phone + name)
-    # Structure: key -> {"email": match, "phone": match, "name": match}
-    all_signals: dict[tuple, dict] = {}
-    for signal_key, source in [("email", email_pairs), ("phone", phone_pairs), ("name", name_pairs)]:
-        for key, match in source.items():
-            all_signals.setdefault(key, {})[signal_key] = match
-
     rows = []
-    for (id_a, id_b), signals in all_signals.items():
+    for (id_a, id_b), match in pairs.items():
         a = lead_map.get(id_a, {})
         b = lead_map.get(id_b, {})
-
-        # First column: which signals matched, in priority order
-        matched = "+".join(k for k in ("email", "phone", "name") if k in signals)
-
-        # Best match is used for the detail columns (email > phone > name)
-        best = signals.get("email") or signals.get("phone") or signals.get("name")
-
         rows.append({
-            "matched_signals": matched,
+            "matched_signals": match["matched_signals"],
             "lead_id_1":       id_a,
             "lead_name_1":     a.get("display_name", ""),
             "lead_status_1":   a.get("status_label", ""),
@@ -389,13 +385,11 @@ def build_report(leads, email_pairs, phone_pairs, name_pairs) -> list[dict]:
             "lead_created_2":  (b.get("date_created") or "")[:10],
             "lead_emails_2":   "|".join(sorted(get_lead_emails(b))),
             "lead_phones_2":   "|".join(sorted(get_lead_phones(b))),
-            "best_match_type":  best["match_type"],
-            "best_match_value": best["match_value"],
-            "confidence":       best["confidence"],
+            "match_value":     match["match_value"],
+            "confidence":      match["confidence"],
         })
 
-    # Sort: multi-signal matches first, then by confidence descending
-    rows.sort(key=lambda r: (r["matched_signals"].count("+"), r["confidence"]), reverse=True)
+    rows.sort(key=lambda r: r["confidence"], reverse=True)
     return rows
 
 
@@ -569,21 +563,9 @@ def main():
 
     leads = filter_website_excluded_leads(leads)
 
-    email_pairs = find_email_duplicates(leads)
-    print(f"  Email exact:  {len(email_pairs):,} pairs", flush=True)
+    pairs = find_duplicate_leads(leads)
 
-    phone_pairs = find_phone_duplicates(leads)
-    print(f"  Phone exact:  {len(phone_pairs):,} pairs", flush=True)
-
-    if ENABLE_FUZZY_NAME:
-        print("  Running fuzzy name matching...", flush=True)
-        name_pairs = find_name_duplicates(leads)
-        print(f"  Name fuzzy:   {len(name_pairs):,} pairs  (threshold={FUZZY_NAME_THRESHOLD})", flush=True)
-    else:
-        name_pairs = {}
-        print("  Name fuzzy:   skipped (ENABLE_FUZZY_NAME=False)", flush=True)
-
-    rows = build_report(leads, email_pairs, phone_pairs, name_pairs)
+    rows = build_report(leads, pairs)
     print(f"\nTotal unique duplicate pairs: {len(rows):,}", flush=True)
 
     write_csv(rows, OUTPUT_CSV)
