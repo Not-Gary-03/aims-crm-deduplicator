@@ -13,9 +13,11 @@ QUICK CONFIG  ← change these two lines to switch modes
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
+import contextlib
 import csv
 import json
 import os
+import re
 import time
 from collections import defaultdict
 
@@ -39,7 +41,11 @@ ALSO_SHOW_MEETING = True
 # If True, fetch one meeting record and display it the same way as the leads,
 # so you can compare lead fields vs meeting fields side by side.
 
-SEARCH = "Andres Perez"
+INCLUDE_LEAD_MEETINGS = False
+# If True, the "pretty" mode fetches and prints all meetings for each lead.
+# Set to False to display only the lead record itself.
+
+SEARCH = "Quentin"
 # Search for a specific lead instead of paginating from the top.
 # Set to a lead ID  → exact lookup:    SEARCH = "lead_abc123"
 # Set to a name     → name search:     SEARCH = "John Smith"
@@ -169,7 +175,7 @@ def show_pretty(records: list[dict], label: str) -> None:
         print(f"{'━'*60}\n")
         print(json.dumps(record, indent=2, ensure_ascii=False, default=str))
 
-        if label == "lead":
+        if label == "lead" and INCLUDE_LEAD_MEETINGS:
             lead_id = record.get("id")
             print(f"\n  ── Meetings for {record.get('display_name', lead_id)} ──", flush=True)
             meetings = fetch_all_meetings_for_lead(lead_id)
@@ -293,9 +299,15 @@ def run(records: list[dict], label: str) -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def make_output_filename() -> str:
+    """Build the output filename from SEARCH, or 'leads' if SEARCH is not set."""
+    label = SEARCH if SEARCH else "leads"
+    safe  = re.sub(r"[^\w\-]", "_", label)   # replace spaces / special chars with _
+    return f"{safe}-fields.txt"
+
+
 def main():
     if SEARCH:
-        # ID lookup: Close lead IDs always start with "lead_"
         if SEARCH.startswith("lead_"):
             leads = fetch_lead_by_id(SEARCH)
         else:
@@ -303,12 +315,16 @@ def main():
     else:
         leads = fetch_leads(LEAD_LIMIT)
 
-    run(leads, "lead")
+    out_path = make_output_filename()
+    with open(out_path, "w", encoding="utf-8") as f:
+        with contextlib.redirect_stdout(f):
+            run(leads, "lead")
+            if ALSO_SHOW_MEETING:
+                meeting = fetch_one_meeting()
+                if meeting:
+                    run([meeting], "meeting")
 
-    if ALSO_SHOW_MEETING:
-        meeting = fetch_one_meeting()
-        if meeting:
-            run([meeting], "meeting")
+    print(f"Output written → {out_path}", flush=True)
 
 
 if __name__ == "__main__":

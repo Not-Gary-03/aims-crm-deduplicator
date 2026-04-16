@@ -39,13 +39,45 @@ ENABLE_FUZZY_NAME    = False
 FUZZY_NAME_THRESHOLD = 85   # 0–100; only relevant when ENABLE_FUZZY_NAME = True
 
 # Debug: set to a positive integer to cap leads fetched (e.g. 500). 0 = fetch all.
-DEBUG_LEAD_LIMIT = int(os.environ.get("DEBUG_LEAD_LIMIT", 10000))
+DEBUG_LEAD_LIMIT = int(os.environ.get("DEBUG_LEAD_LIMIT", 1000))
+
+# ── Exclude List ──────────────────────────────────────────────────────────────
+# Values listed here are never used as duplicate signals.
+#
+# email   — substring match (case-insensitive). Use a domain like "@example.com"
+#            to exclude every address at that domain, or a full address for one.
+# phone   — substring match against normalised digits (e.g. "5550000000").
+# name    — substring match (case-insensitive) against the lead's display_name.
+# website — substring match (case-insensitive) against any URL on the lead or
+#            its contacts. Excludes the ENTIRE lead from all duplicate detection.
+#            e.g. "aimarketingservices.com" blocks all leads with that domain.
+#
+EXCLUDE_LIST = {
+    "email": [
+        # "@aimarketingservices.com",
+        "@wescalecreators.com",
+        "@socialprofitmedia.com",
+        "@leveraged-creator.com",
+        "q@quentininniss.com"
+    ],
+    "phone": [
+        # "5550000000",
+    ],
+    "name": [
+        # "Test Lead",
+    ],
+    "website": [
+        # "aimarketingservices.com",
+        "http://www.quentininniss.com",
+        "http://www.wescalecreators.com"
+    ],
+}
 
 OUTPUT_CSV  = "duplicate_report.csv"
 OUTPUT_JSON = "duplicate_report.json"
 
 # Fields to fetch per lead — keep small to reduce response size and API time
-LEAD_FIELDS    = "id,display_name,contacts,primary_email,primary_phone,date_created,status_label"
+LEAD_FIELDS    = "id,display_name,contacts,primary_email,primary_phone,date_created,status_label,url"
 MEETING_FIELDS = "id,lead_id,contact_id,assigned_to,date_start,date_end,status,title"
 
 MEETING_DUPE_CSV  = "meeting_dupe_report.csv"
@@ -140,6 +172,51 @@ def fetch_all_meetings():
     return meetings
 
 
+# ── Exclude List Helper ───────────────────────────────────────────────────────
+
+def is_excluded(value: str, field: str) -> bool:
+    """
+    Return True if value should be ignored based on EXCLUDE_LIST.
+    All fields use substring matching (case-insensitive).
+    """
+    patterns = EXCLUDE_LIST.get(field, [])
+    if not patterns:
+        return False
+    value_lower = value.lower()
+    return any(p.lower() in value_lower for p in patterns)
+
+
+def get_lead_websites(lead: dict) -> set[str]:
+    """Collect all URLs from the lead itself and its contacts."""
+    urls = set()
+    if lead.get("url"):
+        urls.add(lead["url"].strip().lower())
+    for contact in lead.get("contacts", []):
+        if contact.get("url"):
+            urls.add(contact["url"].strip().lower())
+    return urls - {None, ""}
+
+
+def filter_website_excluded_leads(leads: list[dict]) -> list[dict]:
+    """
+    Remove any lead whose URL matches a website exclude pattern.
+    Website exclusion applies to the whole lead — not just one signal.
+    """
+    patterns = EXCLUDE_LIST.get("website", [])
+    if not patterns:
+        return leads
+    kept, removed = [], 0
+    for lead in leads:
+        websites = get_lead_websites(lead)
+        if any(is_excluded(url, "website") for url in websites):
+            removed += 1
+        else:
+            kept.append(lead)
+    if removed:
+        print(f"  Website exclude list: removed {removed:,} leads", flush=True)
+    return kept
+
+
 # ── Normalisation Helpers ─────────────────────────────────────────────────────
 
 def normalize_email(email: str) -> str | None:
@@ -175,7 +252,7 @@ def get_lead_emails(lead: dict) -> set[str]:
         for e in contact.get("emails", []):
             if e.get("email"):
                 emails.add(normalize_email(e["email"]))
-    return emails - {None}
+    return {e for e in emails if e and not is_excluded(e, "email")}
 
 
 def get_lead_phones(lead: dict) -> set[str]:
@@ -186,7 +263,7 @@ def get_lead_phones(lead: dict) -> set[str]:
         for p in contact.get("phones", []):
             if p.get("phone"):
                 phones.add(normalize_phone(p["phone"]))
-    return phones - {None}
+    return {p for p in phones if p and not is_excluded(p, "phone")}
 
 
 # ── Duplicate Detection ───────────────────────────────────────────────────────
@@ -240,6 +317,8 @@ def find_name_duplicates(leads: list[dict], threshold: int = FUZZY_NAME_THRESHOL
     for lead in leads:
         name = normalize_name(lead.get("display_name", ""))
         if not name:
+            continue
+        if is_excluded(name, "name"):
             continue
         words = name.split()
         first_word = words[0] if words else ""
@@ -366,12 +445,19 @@ def find_duplicate_meetings(leads: list[dict], meetings: list[dict]) -> list[dic
         for phone in get_lead_phones(lead):
             phone_to_leads[phone].append(lead["id"])
 
-    # Index: lead_id → list of meetings on that lead
+    # Index: lead_id → list of meetings on that lead (upcoming only)
     lead_to_meetings: dict[str, list[dict]] = defaultdict(list)
+    statuses_seen: dict[str, int] = defaultdict(int)
     for meeting in meetings:
+        status = meeting.get("status") or "none"
+        statuses_seen[status] += 1
+        if status != "upcoming":
+            continue
         lead_id = meeting.get("lead_id")
-        if lead_id:
+        if lead_id and lead_id in lead_map:
             lead_to_meetings[lead_id].append(meeting)
+    print(f"  Meeting statuses found: { {k: v for k, v in sorted(statuses_seen.items())} }", flush=True)
+    print(f"  Kept {sum(len(v) for v in lead_to_meetings.values()):,} upcoming meetings", flush=True)
 
     rows = []
 
@@ -480,6 +566,8 @@ def main():
     leads = fetch_all_leads()
 
     print("Building duplicate indexes...", flush=True)
+
+    leads = filter_website_excluded_leads(leads)
 
     email_pairs = find_email_duplicates(leads)
     print(f"  Email exact:  {len(email_pairs):,} pairs", flush=True)
