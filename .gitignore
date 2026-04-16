@@ -2,6 +2,12 @@
 .env
 *.env
 
+# Extra files
+extra_info/
+
+# Claude configuration
+.claude/
+
 # Output reports (contain lead PII)
 duplicate_report.csv
 duplicate_report.json
