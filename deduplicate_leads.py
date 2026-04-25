@@ -72,15 +72,15 @@ EXCLUDE_LIST = {
     ],
 }
 
-OUTPUT_CSV  = "duplicate_report.csv"
-OUTPUT_JSON = "duplicate_report.json"
+_TODAY = datetime.now().strftime("%Y-%m-%d")
+_REPORTS_DIR = os.path.join(os.path.dirname(__file__), "reports")
+os.makedirs(_REPORTS_DIR, exist_ok=True)
+OUTPUT_CSV        = os.path.join(_REPORTS_DIR, f"{_TODAY}_duplicate_report.csv")
+MEETING_DUPE_CSV  = os.path.join(_REPORTS_DIR, f"{_TODAY}_meeting_dupe_report.csv")
 
 # Fields to fetch per lead — keep small to reduce response size and API time
 LEAD_FIELDS    = "id,display_name,contacts,primary_email,primary_phone,date_created,status_label,url"
 MEETING_FIELDS = "id,lead_id,contact_id,assigned_to,date_start,date_end,status,title"
-
-MEETING_DUPE_CSV  = "meeting_dupe_report.csv"
-MEETING_DUPE_JSON = "meeting_dupe_report.json"
 
 # ── HTTP Session ──────────────────────────────────────────────────────────────
 
@@ -569,14 +569,12 @@ def main():
     print(f"\nTotal unique duplicate pairs: {len(rows):,}", flush=True)
 
     write_csv(rows, OUTPUT_CSV)
-    write_json(rows, OUTPUT_JSON)
 
     # ── Meeting duplicate detection ───────────────────────────────────────────
     print("\n── Meeting duplicates ───────────────────────────────────", flush=True)
     meetings = fetch_all_meetings()
     meeting_rows = find_duplicate_meetings(leads, meetings)
     write_meeting_csv(meeting_rows, MEETING_DUPE_CSV)
-    write_meeting_json(meeting_rows, MEETING_DUPE_JSON)
 
 
 if __name__ == "__main__":
