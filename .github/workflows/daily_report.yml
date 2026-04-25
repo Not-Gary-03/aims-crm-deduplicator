@@ -1,0 +1,24 @@
+name: Daily Report
+
+on:
+  schedule:
+    - cron: '0 7 * * *'  # Every day at 7:00 AM UTC
+
+jobs:
+  run-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run report script
+        run: python deduplicate_leads.py
