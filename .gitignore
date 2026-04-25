@@ -8,9 +8,6 @@ extra_info/
 # Claude configuration
 .claude/
 
-# Output reports (contain lead PII)
-reports/
-
 # Python
 __pycache__/
 *.pyc
